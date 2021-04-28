@@ -40,25 +40,33 @@ from albumentations.pytorch import ToTensorV2
 
 def get_train_transforms():
     return Compose([
-        # RandomResizedCrop(CFG['img_size'], CFG['img_size']),
-        # Transpose(p=0.5),
-        # HorizontalFlip(p=0.5),
-        # VerticalFlip(p=0.5),
-        # ShiftScaleRotate(p=0.5),
-        # HueSaturationValue(),
-        # RandomBrightnessContrast(brightness_limit=(-0.1, 0.1), contrast_limit=(-0.1, 0.1), p=0.5),
+        RandomResizedCrop(CFG['img_size'], CFG['img_size']),
+        Transpose(p=0.5),
+        HorizontalFlip(p=0.5),
+        VerticalFlip(p=0.5),
+        ShiftScaleRotate(p=0.5),
+        HueSaturationValue(),
+        RandomBrightnessContrast(brightness_limit=(-0.1, 0.1), contrast_limit=(-0.1, 0.1), p=0.5),
         # Normalize(mean=[0, 0, 0], std=[1, 1, 1], max_pixel_value=255.0, p=1.0),
         Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225], max_pixel_value=255.0, p=1.0),
-        # CoarseDropout(p=0.5),
-        # Cutout(p=0.5),
+        CoarseDropout(p=0.5),
+        Cutout(p=0.5),
+        ToTensorV2(p=1.0),
+    ], p=1.)
+
+
+def get_valid_transforms():
+    return Compose([
+        Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225], max_pixel_value=255.0, p=1.0),
         ToTensorV2(p=1.0),
     ], p=1.)
 
 
 class IntelDataset(Dataset):
-    def __init__(self, df):
+    def __init__(self, df, transform):
         super().__init__()
         self.df = df
+        self.transform = transform
 
     def __len__(self):
         return self.df.shape[0]
@@ -69,7 +77,7 @@ class IntelDataset(Dataset):
         if img.shape != (150, 150, 3):
             img = cv2.warpAffine(img, np.float32([[150. / img.shape[0], 0, 0], [0, 150. / img.shape[1], 0]]), (150, 150))
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        img = get_train_transforms()(image=img)['image']
+        img = self.transform(image=img)['image']
 
         return img, self.df.label[index]
 
@@ -90,8 +98,8 @@ def prepare_dataloader(df, trn_idx, df_valid, val_idx):
     train_ = df.loc[trn_idx, :].reset_index(drop=True)
     valid_ = df_valid.loc[val_idx, :].reset_index(drop=True)
 
-    train_ds = IntelDataset(train_)
-    valid_ds = IntelDataset(valid_)
+    train_ds = IntelDataset(train_, get_train_transforms())
+    valid_ds = IntelDataset(valid_, get_valid_transforms())
 
     train_loader = torch.utils.data.DataLoader(
         train_ds,
@@ -159,7 +167,7 @@ CFG = {
 }
 
 
-def getDF(root_path):
+def getImagesAndLabels(root_path):
     labelMap = {}
     for (labelID, entity) in enumerate(os.listdir(root_path)):
         labelMap[entity] = labelID
@@ -181,9 +189,9 @@ test_root_path = "./data/seg_test/seg_test"
 if __name__ == "__main__":
     seed_all(CFG['seed'])
 
-    paths, labels = getDF(train_root_path)
+    paths, labels = getImagesAndLabels(train_root_path)
     train = pd.DataFrame(data={"image_id": paths, "label": labels})
-    paths, labels = getDF(test_root_path)
+    paths, labels = getImagesAndLabels(test_root_path)
     valid = pd.DataFrame(data={"image_id": paths, "label": labels})
     # train = train[0:20]
 
