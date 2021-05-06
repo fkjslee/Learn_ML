@@ -33,7 +33,10 @@ def seed_everything(seed):
 
 seed_everything(SEED)
 
-root_path = "G:\GWHD"
+platform = pd.read_csv("platform.csv")
+root_path = platform.values[0, 0]
+device = torch.device(platform.values[0, 1])
+
 marking = pd.read_csv(os.path.join(root_path, "train.csv"))
 
 bboxs = np.stack(marking['bbox'].apply(lambda x: np.fromstring(x[1:-1], sep=',')))
@@ -60,18 +63,18 @@ for fold_number, (train_index, val_index) in enumerate(skf.split(X=df_folds.inde
 def get_train_transforms():
     return A.Compose(
         [
-            A.RandomSizedCrop(min_max_height=(800, 800), height=1024, width=1024, p=0.5),
-            A.OneOf([
-                A.HueSaturationValue(hue_shift_limit=0.2, sat_shift_limit=0.2,
-                                     val_shift_limit=0.2, p=0.9),
-                A.RandomBrightnessContrast(brightness_limit=0.2,
-                                           contrast_limit=0.2, p=0.9),
-            ], p=0.9),
-            A.ToGray(p=0.01),
-            A.HorizontalFlip(p=0.5),
-            A.VerticalFlip(p=0.5),
+            # A.RandomSizedCrop(min_max_height=(800, 800), height=1024, width=1024, p=0.5),
+            # A.OneOf([
+            #     A.HueSaturationValue(hue_shift_limit=0.2, sat_shift_limit=0.2,
+            #                          val_shift_limit=0.2, p=0.9),
+            #     A.RandomBrightnessContrast(brightness_limit=0.2,
+            #                                contrast_limit=0.2, p=0.9),
+            # ], p=0.9),
+            # A.ToGray(p=0.01),
+            # A.HorizontalFlip(p=0.5),
+            # A.VerticalFlip(p=0.5),
             A.Resize(height=512, width=512, p=1),
-            A.Cutout(num_holes=8, max_h_size=64, max_w_size=64, fill_value=0, p=0.5),
+            # A.Cutout(num_holes=8, max_h_size=64, max_w_size=64, fill_value=0, p=0.5),
             ToTensorV2(p=1.0),
         ],
         p=1.0,
@@ -214,18 +217,19 @@ validation_dataset = DatasetRetriever(
     test=True,
 )
 
-image, target, image_id = train_dataset[1]
-boxes = target['boxes'].cpu().numpy().astype(np.int32)
-
-numpy_image = image.permute(1, 2, 0).cpu().numpy()
-
-fig, ax = plt.subplots(1, 1, figsize=(16, 8))
-
-for box in boxes:
-    cv2.rectangle(numpy_image, (box[1], box[0]), (box[3], box[2]), (0, 1, 0), 2)
-
-ax.set_axis_off()
-ax.imshow(numpy_image)
+# image, target, image_id = train_dataset[1]
+# print(image.shape)
+# boxes = target['boxes'].cpu().numpy().astype(np.int32)
+#
+# numpy_image = image.permute(1, 2, 0).cpu().numpy()
+# print(numpy_image.shape)
+#
+# for box in boxes:
+#     cv2.rectangle(numpy_image, (box[1], box[0]), (box[3], box[2]), (0, 1, 0), 2)
+#
+# numpy_image = cv2.cvtColor(numpy_image, cv2.COLOR_RGB2BGR)
+# cv2.imshow("img", numpy_image)
+# cv2.waitKey(0)
 
 
 class AverageMeter(object):
@@ -329,7 +333,12 @@ class Fitter:
                 boxes = [target['boxes'].to(self.device).float() for target in targets]
                 labels = [target['labels'].to(self.device).float() for target in targets]
 
-                loss, _, _ = self.model(images, boxes, labels)
+                target_res = {'bbox': boxes, 'cls': labels,
+                              "img_scale": torch.tensor([1.0] * batch_size, dtype=torch.float).to(self.device),
+                              "img_size": torch.tensor([images[0].shape[-2:]] * batch_size, dtype=torch.float).to(
+                                  self.device)}
+                outputs = self.model(images, target_res)
+                loss = outputs['loss']
                 summary_loss.update(loss.detach().item(), batch_size)
 
         return summary_loss
@@ -341,11 +350,7 @@ class Fitter:
         for step, (images, targets, image_ids) in enumerate(train_loader):
             if self.config.verbose:
                 if step % self.config.verbose_step == 0:
-                    print(
-                        f'Train Step {step}/{len(train_loader)}, ' + \
-                        f'summary_loss: {summary_loss.avg:.5f}, ' + \
-                        f'time: {(time.time() - t):.5f}', end='\r'
-                    )
+                    print(f'Train Step {step}/{len(train_loader)}, ' + f'summary_loss: {summary_loss.avg:.5f}, ' + f'time: {(time.time() - t):.5f}', end='\r\n')
 
             images = torch.stack(images)
             images = images.to(self.device).float()
@@ -398,7 +403,7 @@ class Fitter:
 
 class TrainGlobalConfig:
     num_workers = 0
-    batch_size = 1
+    batch_size = 3
     n_epochs = 3  # n_epochs = 40
     lr = 0.0002
 
@@ -428,7 +433,6 @@ def collate_fn(batch):
 
 
 def run_training():
-    device = torch.device('cuda:0')
     net.to(device)
 
     train_loader = torch.utils.data.DataLoader(
@@ -473,4 +477,14 @@ def get_net():
 
 net = get_net()
 
-run_training()
+while True:
+    try:
+        run_training()
+        break
+    except RuntimeError as e:
+        print('\033[31m')
+        print(e)
+        TrainGlobalConfig.batch_size -= 1
+        print('batch size set to %d' % TrainGlobalConfig.batch_size)
+        print('\033[0m')
+        break
