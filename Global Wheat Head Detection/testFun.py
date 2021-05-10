@@ -1,6 +1,7 @@
+import numpy as np
+import torch
 
-def func(**kwargs):
-    print(kwargs)
 
-dic = {"a": 1, "b": 2}
-func(**dic)
+a = 64*64+32*32+16*16+8*8+4*4
+print(a)
+print(a * 9)

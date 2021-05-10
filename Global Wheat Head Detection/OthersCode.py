@@ -1,7 +1,6 @@
 # reference: https://www.kaggle.com/shonenkov/training-efficientdet/notebook
 import sys
 
-from effdet.object_detection import BoxList
 import torch
 import os
 from datetime import datetime
@@ -18,6 +17,8 @@ from torch.utils.data import Dataset, DataLoader
 from torch.utils.data.sampler import SequentialSampler, RandomSampler
 from glob import glob
 
+from effdet.anchors import Anchors, AnchorLabeler, BoxList
+
 SEED = 42
 
 
@@ -29,35 +30,6 @@ def seed_everything(seed):
     torch.cuda.manual_seed(seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = True
-
-
-seed_everything(SEED)
-
-platform = pd.read_csv("platform.csv")
-root_path = platform.values[0, 0]
-device = torch.device(platform.values[0, 1])
-
-marking = pd.read_csv(os.path.join(root_path, "train.csv"))
-
-bboxs = np.stack(marking['bbox'].apply(lambda x: np.fromstring(x[1:-1], sep=',')))
-for i, column in enumerate(['x', 'y', 'w', 'h']):
-    marking[column] = bboxs[:, i]
-marking.drop(columns=['bbox'], inplace=True)
-
-skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
-
-df_folds = marking[['image_id']].copy()
-df_folds.loc[:, 'bbox_count'] = 1
-df_folds = df_folds.groupby('image_id').count()
-df_folds.loc[:, 'source'] = marking[['image_id', 'source']].groupby('image_id').min()['source']
-df_folds.loc[:, 'stratify_group'] = np.char.add(
-    df_folds['source'].values.astype(str),
-    df_folds['bbox_count'].apply(lambda x: f'_{x // 15}').values.astype(str)
-)
-df_folds.loc[:, 'fold'] = 0
-
-for fold_number, (train_index, val_index) in enumerate(skf.split(X=df_folds.index, y=df_folds['stratify_group'])):
-    df_folds.loc[df_folds.iloc[val_index].index, 'fold'] = fold_number
 
 
 def get_train_transforms():
@@ -103,23 +75,39 @@ def get_valid_transforms():
     )
 
 
-TRAIN_ROOT_PATH = os.path.join(root_path, "train")
+def get_test_transforms():
+    return A.Compose(
+        [
+            A.Resize(height=512, width=512, p=1.0),
+            ToTensorV2(p=1.0),
+        ],
+        p=1.0,
+    )
 
 
 class DatasetRetriever(Dataset):
 
-    def __init__(self, marking, image_ids, transforms=None, test=False):
+    def __init__(self, marking, image_ids, transforms=None, test=False, has_label=True):
         super().__init__()
 
         self.image_ids = image_ids
         self.marking = marking
         self.transforms = transforms
         self.test = test
+        self.has_label = has_label
 
     def __getitem__(self, index: int):
+        if not self.has_label:
+            image_id = self.image_ids[index]
+            image = cv2.imread(f'{TEST_ROOT_PATH}/{image_id}.jpg', cv2.IMREAD_COLOR)
+            image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB).astype(np.float32)
+            image /= 255.0
+            image = self.transforms(image=image)['image']
+            return image, 0, 0
+
         image_id = self.image_ids[index]
 
-        if self.test or random.random() > 0.5:
+        if self.test or random.random() > 0.0:
             image, boxes = self.load_image_and_boxes(index)
         else:
             image, boxes = self.load_cutmix_image_and_boxes(index)
@@ -127,7 +115,7 @@ class DatasetRetriever(Dataset):
         # there is only one class
         labels = torch.ones((boxes.shape[0],), dtype=torch.int64)
 
-        target = {'boxes': boxes, 'labels': labels, 'image_id': torch.tensor([index])}
+        target = {'boxes': torch.from_numpy(boxes), 'labels': labels, 'image_id': torch.tensor([index])}
 
         if self.transforms:
             for i in range(10):
@@ -138,6 +126,7 @@ class DatasetRetriever(Dataset):
                     target['boxes'][:, [0, 1, 2, 3]] = target['boxes'][:, [1, 0, 3, 2]]  # yxyx: be warning
                     target['labels'] = torch.stack(sample['labels'])
                     break
+        print('getItem', f'{TRAIN_ROOT_PATH}/{image_id}.jpg')
         return image, target, image_id
 
     def __len__(self) -> int:
@@ -199,23 +188,6 @@ class DatasetRetriever(Dataset):
         result_boxes = result_boxes[
             np.where((result_boxes[:, 2] - result_boxes[:, 0]) * (result_boxes[:, 3] - result_boxes[:, 1]) > 0)]
         return result_image, result_boxes
-
-
-fold_number = 0
-
-train_dataset = DatasetRetriever(
-    image_ids=df_folds[df_folds['fold'] != fold_number].index.values,
-    marking=marking,
-    transforms=get_train_transforms(),
-    test=False,
-)
-
-validation_dataset = DatasetRetriever(
-    image_ids=df_folds[df_folds['fold'] == fold_number].index.values,
-    marking=marking,
-    transforms=get_valid_transforms(),
-    test=True,
-)
 
 # image, target, image_id = train_dataset[1]
 # print(image.shape)
@@ -284,6 +256,7 @@ class Fitter:
         self.log(f'Fitter prepared. Device is {self.device}')
 
     def fit(self, train_loader, validation_loader):
+        self.load('effdet5-cutmix-augmix/best-checkpoint-001epoch.bin')
         for e in range(self.config.n_epochs):
             if self.config.verbose:
                 lr = self.optimizer.param_groups[0]['lr']
@@ -351,12 +324,12 @@ class Fitter:
             if self.config.verbose:
                 if step % self.config.verbose_step == 0:
                     print(f'Train Step {step}/{len(train_loader)}, ' + f'summary_loss: {summary_loss.avg:.5f}, ' + f'time: {(time.time() - t):.5f}', end='\r\n')
-
             images = torch.stack(images)
             images = images.to(self.device).float()
             batch_size = images.shape[0]
             boxes = [target['boxes'].to(self.device).float() for target in targets]
             labels = [target['labels'].to(self.device).float() for target in targets]
+            print('boxes len', boxes[0].shape)
 
             target_res = {'bbox': boxes, 'cls': labels}
 
@@ -377,6 +350,7 @@ class Fitter:
         return summary_loss
 
     def save(self, path):
+        return
         self.model.eval()
         torch.save({
             'model_state_dict': self.model.model.state_dict(),
@@ -401,9 +375,12 @@ class Fitter:
             logger.write(f'{message}\n')
 
 
+from effdet import DetBenchPredict
+
+
 class TrainGlobalConfig:
     num_workers = 0
-    batch_size = 3
+    batch_size = 1
     n_epochs = 3  # n_epochs = 40
     lr = 0.0002
 
@@ -472,19 +449,112 @@ def get_net():
 
     net.reset_head(num_classes=1)
     net.class_net = HeadNet(config, num_outputs=config.num_classes)
+    print("config ", config)
     return DetBenchTrain(net, config)
 
 
-net = get_net()
+stage = "test"
 
-while True:
-    try:
+if __name__ == "__main__":
+    root_path = sys.argv[1]
+    device = torch.device(sys.argv[2])
+    seed_everything(SEED)
+    net = get_net()
+
+    if stage == "test":
+        TEST_ROOT_PATH = os.path.join(root_path, "test")
+        image_names = []
+        for file_name in os.listdir(TEST_ROOT_PATH):
+            image_names.append(file_name[:-4])
+        image_names = pd.DataFrame(data={"image_id": image_names})
+
+        test_dataset = DatasetRetriever(
+            image_ids=image_names.image_id.values,
+            marking=None,
+            transforms=get_test_transforms(),
+            test=True,
+            has_label=False,
+        )
+        test_loader = torch.utils.data.DataLoader(
+            test_dataset,
+            batch_size=1,
+            num_workers=TrainGlobalConfig.num_workers,
+            shuffle=False,
+            sampler=SequentialSampler(test_dataset),
+            pin_memory=False,
+            collate_fn=collate_fn,
+        )
+        fitter = Fitter(net, device, TrainGlobalConfig)
+        fitter.load(f'{f"./{TrainGlobalConfig.folder}"}/last-checkpoint.bin')
+        predictor = fitter.model.model
+        anchors = Anchors.from_config(net.model.config)
+        for step, (images, _, _) in enumerate(test_loader):
+            images = torch.stack(images)
+            class_outs, box_outs = predictor(images)
+            print('*' * 100)
+            cls_target = []
+            box_target = []
+            for level in range(anchors.min_level, anchors.max_level):
+                level_idx = level - anchors.min_level
+                cls_target.extend(class_outs[level_idx].view(-1))
+                box_target.extend(box_outs[level_idx].view(-1, 4))
+            cls_target = torch.sigmoid(torch.tensor(cls_target))
+            image = images[0].permute(1, 2, 0).cpu().data.numpy()
+            image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+            for i, c_out in enumerate(cls_target):
+                if c_out > 0.8 and i < 49104:
+                    bbox = BoxList(anchors.boxes).data['boxes'][i]
+                    cv2.rectangle(image, (bbox[1], bbox[0]), (bbox[3], bbox[2]), (0, 0, 255), 2)
+            cv2.imshow("to delete img", image)
+            cv2.waitKey(0)
+
+            for class_out, box_out in zip(class_outs, box_outs):
+                print('result')
+                class_out = class_out.reshape(-1, 1)
+                box_out = box_out.reshape(-1, 4)
+                print(class_out.shape)
+                print(box_out.shape)
+                print(class_out[0])
+                print(box_out[0])
+                print()
+    else:
+        TRAIN_ROOT_PATH = os.path.join(root_path, "train")
+        marking = pd.read_csv(os.path.join(root_path, "train.csv"))
+
+        bboxs = np.stack(marking['bbox'].apply(lambda x: np.fromstring(x[1:-1], sep=',')))
+        for i, column in enumerate(['x', 'y', 'w', 'h']):
+            marking[column] = bboxs[:, i]
+        marking.drop(columns=['bbox'], inplace=True)
+
+        skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+
+        df_folds = marking[['image_id']].copy()
+        df_folds.loc[:, 'bbox_count'] = 1
+        df_folds = df_folds.groupby('image_id').count()
+        df_folds.loc[:, 'source'] = marking[['image_id', 'source']].groupby('image_id').min()['source']
+        df_folds.loc[:, 'stratify_group'] = np.char.add(
+            df_folds['source'].values.astype(str),
+            df_folds['bbox_count'].apply(lambda x: f'_{x // 15}').values.astype(str)
+        )
+        df_folds.loc[:, 'fold'] = 0
+
+        for fold_number, (train_index, val_index) in enumerate(
+                skf.split(X=df_folds.index, y=df_folds['stratify_group'])):
+            df_folds.loc[df_folds.iloc[val_index].index, 'fold'] = fold_number
+
+        fold_number = 0
+
+        train_dataset = DatasetRetriever(
+            image_ids=df_folds[df_folds['fold'] != fold_number].index.values,
+            marking=marking,
+            transforms=get_train_transforms(),
+            test=False,
+        )
+
+        validation_dataset = DatasetRetriever(
+            image_ids=df_folds[df_folds['fold'] == fold_number].index.values,
+            marking=marking,
+            transforms=get_valid_transforms(),
+            test=True,
+        )
         run_training()
-        break
-    except RuntimeError as e:
-        print('\033[31m')
-        print(e)
-        TrainGlobalConfig.batch_size -= 1
-        print('batch size set to %d' % TrainGlobalConfig.batch_size)
-        print('\033[0m')
-        break
