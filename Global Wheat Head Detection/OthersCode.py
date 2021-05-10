@@ -16,6 +16,7 @@ from sklearn.model_selection import StratifiedKFold
 from torch.utils.data import Dataset, DataLoader
 from torch.utils.data.sampler import SequentialSampler, RandomSampler
 from glob import glob
+import nms
 
 from effdet.anchors import Anchors, AnchorLabeler, BoxList
 
@@ -103,7 +104,8 @@ class DatasetRetriever(Dataset):
             image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB).astype(np.float32)
             image /= 255.0
             image = self.transforms(image=image)['image']
-            return image, 0, 0
+            print('test image id', f'{TEST_ROOT_PATH}/{image_id}.jpg', cv2.IMREAD_COLOR)
+            return image, 0, f'{image_id}'
 
         image_id = self.image_ids[index]
 
@@ -189,6 +191,7 @@ class DatasetRetriever(Dataset):
             np.where((result_boxes[:, 2] - result_boxes[:, 0]) * (result_boxes[:, 3] - result_boxes[:, 1]) > 0)]
         return result_image, result_boxes
 
+
 # image, target, image_id = train_dataset[1]
 # print(image.shape)
 # boxes = target['boxes'].cpu().numpy().astype(np.int32)
@@ -208,19 +211,19 @@ class AverageMeter(object):
     """Computes and stores the average and current value"""
 
     def __init__(self):
+        self.val = 0
+        self.sum = 0
+        self.count = 0
+        self.avg = self.sum / self.count
         self.reset()
 
     def reset(self):
-        self.val = 0
         self.avg = 0
-        self.sum = 0
-        self.count = 0
 
     def update(self, val, n=1):
         self.val = val
         self.sum += val * n
         self.count += n
-        self.avg = self.sum / self.count
 
 
 import warnings
@@ -244,12 +247,12 @@ class Fitter:
         self.model = model
         self.device = device
 
-        param_optimizer = list(self.model.named_parameters())
-        no_decay = ['bias', 'LayerNorm.bias', 'LayerNorm.weight']
-        optimizer_grouped_parameters = [
-            {'params': [p for n, p in param_optimizer if not any(nd in n for nd in no_decay)], 'weight_decay': 0.001},
-            {'params': [p for n, p in param_optimizer if any(nd in n for nd in no_decay)], 'weight_decay': 0.0}
-        ]
+        # param_optimizer = list(self.model.named_parameters())
+        # no_decay = ['bias', 'LayerNorm.bias', 'LayerNorm.weight']
+        # optimizer_grouped_parameters = [
+        #     {'params': [p for n, p in param_optimizer if not any(nd in n for nd in no_decay)], 'weight_decay': 0.001},
+        #     {'params': [p for n, p in param_optimizer if any(nd in n for nd in no_decay)], 'weight_decay': 0.0}
+        # ]
 
         self.optimizer = torch.optim.AdamW(self.model.parameters(), lr=config.lr)
         self.scheduler = config.SchedulerClass(self.optimizer, **config.scheduler_params)
@@ -295,9 +298,7 @@ class Fitter:
             if self.config.verbose:
                 if step % self.config.verbose_step == 0:
                     print(
-                        f'Val Step {step}/{len(val_loader)}, ' + \
-                        f'summary_loss: {summary_loss.avg:.5f}, ' + \
-                        f'time: {(time.time() - t):.5f}', end='\r'
+                        f'Val Step {step}/{len(val_loader)}, ' + f'summary_loss: {summary_loss.avg:.5f}, ' + f'time: {(time.time() - t):.5f}', end='\r'
                     )
             with torch.no_grad():
                 images = torch.stack(images)
@@ -323,7 +324,9 @@ class Fitter:
         for step, (images, targets, image_ids) in enumerate(train_loader):
             if self.config.verbose:
                 if step % self.config.verbose_step == 0:
-                    print(f'Train Step {step}/{len(train_loader)}, ' + f'summary_loss: {summary_loss.avg:.5f}, ' + f'time: {(time.time() - t):.5f}', end='\r\n')
+                    print(
+                        f'Train Step {step}/{len(train_loader)}, ' + f'summary_loss: {summary_loss.avg:.5f}, ' + f'time: {(time.time() - t):.5f}',
+                        end='\r\n')
             images = torch.stack(images)
             images = images.to(self.device).float()
             batch_size = images.shape[0]
@@ -373,9 +376,6 @@ class Fitter:
             print(message)
         with open(self.log_path, 'a+') as logger:
             logger.write(f'{message}\n')
-
-
-from effdet import DetBenchPredict
 
 
 class TrainGlobalConfig:
@@ -485,38 +485,57 @@ if __name__ == "__main__":
             collate_fn=collate_fn,
         )
         fitter = Fitter(net, device, TrainGlobalConfig)
-        fitter.load(f'{f"./{TrainGlobalConfig.folder}"}/last-checkpoint.bin')
+        fitter.load(f'{f"./{TrainGlobalConfig.folder}"}/best-checkpoint-001epoch.bin')
         predictor = fitter.model.model
         anchors = Anchors.from_config(net.model.config)
-        for step, (images, _, _) in enumerate(test_loader):
+        ans_image_id = []
+        ans_pred_str = []
+        for step, (images, _, image_name) in enumerate(test_loader):
             images = torch.stack(images)
             class_outs, box_outs = predictor(images)
-            print('*' * 100)
+            print('*' * 100, images.shape)
             cls_target = []
-            box_target = []
             for level in range(anchors.min_level, anchors.max_level):
                 level_idx = level - anchors.min_level
-                cls_target.extend(class_outs[level_idx].view(-1))
-                box_target.extend(box_outs[level_idx].view(-1, 4))
+                cls_target.extend(class_outs[level_idx].permute(0, 2, 3, 1).reshape(-1))
             cls_target = torch.sigmoid(torch.tensor(cls_target))
+            anchor_box_list = BoxList(anchors.boxes).data['boxes']
+            box_list = []
+            box_confidence = []
+
+            pred_str = ""
+            for i, c_out in enumerate(cls_target):
+                if c_out > 0.5:
+                    bbox = anchor_box_list[i]
+                    xmin, ymin, xmax, ymax = bbox.int().cpu().data.numpy()
+                    confidence = float(c_out.cpu().data.numpy())
+                    pred_str += str(confidence) + " " + str(xmin) + " " + str(ymin) + " " + str(xmax) + " " + str(ymax)
+                    bbox = [int(xmin), int(ymin), int(xmax - xmin), int(ymax - ymin)]
+                    box_list.append(bbox)
+                    box_confidence.append(confidence)
+            ans_image_id.append(image_name[0])
+            ans_pred_str.append(pred_str)
+
+            box_idx = cv2.dnn.NMSBoxes(box_list, box_confidence, 0.5, 0.4)
+            print('bef shape', len(box_list))
+            box_list = np.int32(box_list)[np.swapaxes(box_idx, 0, 1)[0]]
+            print('aft shape', len(box_list))
             image = images[0].permute(1, 2, 0).cpu().data.numpy()
             image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
-            for i, c_out in enumerate(cls_target):
-                if c_out > 0.8 and i < 49104:
-                    bbox = BoxList(anchors.boxes).data['boxes'][i]
-                    cv2.rectangle(image, (bbox[1], bbox[0]), (bbox[3], bbox[2]), (0, 0, 255), 2)
-            cv2.imshow("to delete img", image)
-            cv2.waitKey(0)
+            for bbox in box_list:
+                bbox[2] += bbox[0]
+                bbox[3] += bbox[1]
+                cv2.rectangle(image, (bbox[1], bbox[0]), (bbox[3], bbox[2]), (0, 0, 1.0), 2)
+            image = (image * 255).astype(np.uint8)
+            # print(os.path.join(root_path, "pred_image", image_name[0] + ".png"))
+            # cv2.imshow("img", image)
+            # cv2.waitKey(0)
+            # cv2.imwrite(os.path.join(root_path, "pred_image", image_name[0] + ".png"), image)
 
-            for class_out, box_out in zip(class_outs, box_outs):
-                print('result')
-                class_out = class_out.reshape(-1, 1)
-                box_out = box_out.reshape(-1, 4)
-                print(class_out.shape)
-                print(box_out.shape)
-                print(class_out[0])
-                print(box_out[0])
-                print()
+        ans = pd.DataFrame({"image_id": ans_image_id, "PredictionString": ans_pred_str})
+        print(ans)
+        ans.to_csv("./submission.csv")
+
     else:
         TRAIN_ROOT_PATH = os.path.join(root_path, "train")
         marking = pd.read_csv(os.path.join(root_path, "train.csv"))
