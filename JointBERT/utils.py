@@ -9,19 +9,7 @@ from seqeval.metrics import precision_score, recall_score, f1_score
 from transformers import BertConfig, DistilBertConfig, AlbertConfig
 from transformers import BertTokenizer, DistilBertTokenizer, AlbertTokenizer
 
-from model import JointBERT, JointDistilBERT, JointAlbert
-
-MODEL_CLASSES = {
-    'bert': (BertConfig, JointBERT, BertTokenizer),
-    'distilbert': (DistilBertConfig, JointDistilBERT, DistilBertTokenizer),
-    'albert': (AlbertConfig, JointAlbert, AlbertTokenizer)
-}
-
-MODEL_PATH_MAP = {
-    'bert': 'bert-base-uncased',
-    'distilbert': 'distilbert-base-uncased',
-    'albert': 'albert-xxlarge-v1'
-}
+from model import JointBERT
 
 
 def get_intent_labels(args):
@@ -33,7 +21,7 @@ def get_slot_labels(args):
 
 
 def load_tokenizer(args):
-    return MODEL_CLASSES[args.model_type][2].from_pretrained(args.model_name_or_path)
+    return BertTokenizer.from_pretrained(args.model_name_or_path)
 
 
 def init_logger():

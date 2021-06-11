@@ -7,7 +7,9 @@ import torch
 from torch.utils.data import DataLoader, RandomSampler, SequentialSampler
 from transformers import BertConfig, AdamW, get_linear_schedule_with_warmup
 
-from utils import MODEL_CLASSES, compute_metrics, get_intent_labels, get_slot_labels
+from utils import compute_metrics, get_intent_labels, get_slot_labels
+from model import JointBERT
+from transformers import BertTokenizer
 
 logger = logging.getLogger(__name__)
 
@@ -24,7 +26,7 @@ class Trainer(object):
         # Use cross entropy ignore index as padding label id so that only real label ids contribute to the loss later
         self.pad_token_label_id = args.ignore_index
 
-        self.config_class, self.model_class, _ = MODEL_CLASSES[args.model_type]
+        self.config_class, self.model_class, _ = BertConfig, JointBERT, BertTokenizer
         self.config = self.config_class.from_pretrained(args.model_name_or_path, finetuning_task=args.task)
         self.model = self.model_class.from_pretrained(args.model_name_or_path,
                                                       config=self.config,
@@ -70,20 +72,16 @@ class Trainer(object):
         tr_loss = 0.0
         self.model.zero_grad()
 
-        train_iterator = trange(int(self.args.num_train_epochs), desc="Epoch")
+        train_iterator = trange(int(self.args.num_train_epochs), desc="Epoch", position=0)
 
         for _ in train_iterator:
-            epoch_iterator = tqdm(train_dataloader, desc="Iteration")
+            epoch_iterator = tqdm(train_dataloader, desc="Iteration", position=0)
             for step, batch in enumerate(epoch_iterator):
                 self.model.train()
                 batch = tuple(t.to(self.device) for t in batch)  # GPU or CPU
 
-                inputs = {'input_ids': batch[0],
-                          'attention_mask': batch[1],
-                          'intent_label_ids': batch[3],
-                          'slot_labels_ids': batch[4]}
-                if self.args.model_type != 'distilbert':
-                    inputs['token_type_ids'] = batch[2]
+                inputs = {'input_ids': batch[0], 'attention_mask': batch[1], 'intent_label_ids': batch[3],
+                          'slot_labels_ids': batch[4], 'token_type_ids': batch[2]}
                 outputs = self.model(**inputs)
                 loss = outputs[0]
 
@@ -144,12 +142,8 @@ class Trainer(object):
         for batch in tqdm(eval_dataloader, desc="Evaluating"):
             batch = tuple(t.to(self.device) for t in batch)
             with torch.no_grad():
-                inputs = {'input_ids': batch[0],
-                          'attention_mask': batch[1],
-                          'intent_label_ids': batch[3],
-                          'slot_labels_ids': batch[4]}
-                if self.args.model_type != 'distilbert':
-                    inputs['token_type_ids'] = batch[2]
+                inputs = {'input_ids': batch[0], 'attention_mask': batch[1], 'intent_label_ids': batch[3],
+                          'slot_labels_ids': batch[4], 'token_type_ids': batch[2]}
                 outputs = self.model(**inputs)
                 tmp_eval_loss, (intent_logits, slot_logits) = outputs[:2]
 
