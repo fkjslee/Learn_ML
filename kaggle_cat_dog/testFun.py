@@ -1,9 +1,17 @@
+from albumentations import (
+    HorizontalFlip, VerticalFlip, Transpose, HueSaturationValue,
+    RandomResizedCrop,
+    RandomBrightnessContrast, Compose, Normalize, CoarseDropout,
+    ShiftScaleRotate, CenterCrop, Resize
+)
+
+from albumentations.pytorch import ToTensorV2
 import cv2
-import torch.nn as nn
+
+# img = cv2.imread("train/cat.0.jpg")
+# cv2.imshow("imgpre", img)
+# img = CenterCrop(100, 100, p=1.)(image=img)['image']
+# cv2.imshow("imgaft", img)
+# cv2.waitKey(0)
 import torch
-
-x = torch.rand((20, 2), dtype=torch.float)
-
-y = nn.Softmax(dim=1)(x)
-print(torch.topk(x, 1, 1).indices.reshape(-1))
-print(torch.topk(y, 1, 1).indices.reshape(-1))
+print(torch.__version__)

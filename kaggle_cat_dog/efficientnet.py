@@ -10,30 +10,56 @@ import torch.utils.data as Data
 import torchvision
 import pandas as pd
 from torch.utils.tensorboard import SummaryWriter
+import timm
+
+from albumentations import (
+    HorizontalFlip, VerticalFlip, Transpose, HueSaturationValue,
+    RandomResizedCrop,
+    RandomBrightnessContrast, Compose, Normalize, CoarseDropout,
+    ShiftScaleRotate, CenterCrop, Resize
+)
+
+from albumentations.pytorch import ToTensorV2
+
+
+def get_train_transforms():
+    return Compose([
+        RandomResizedCrop(400, 400),
+        Transpose(p=0.5),
+        HorizontalFlip(p=0.5),
+        VerticalFlip(p=0.5),
+        ShiftScaleRotate(p=0.5),
+        HueSaturationValue(),
+        RandomBrightnessContrast(),
+        Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225], max_pixel_value=255.0, p=1.0),
+        CoarseDropout(),
+        ToTensorV2(p=1.0),
+    ], p=1.)
+
+
+def get_valid_transforms():
+    return Compose([
+        RandomResizedCrop(400, 400),
+        Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225], max_pixel_value=255.0, p=1.0),
+        ToTensorV2(p=1.0),
+    ], p=1.)
 
 
 class CatDogDataset(TensorDataset):
-    def __init__(self, root_path):
+    def __init__(self, root_path, transform: Compose):
         super().__init__()
         self.root_path = root_path
         self.filenames = os.listdir(root_path)
+        self.transform = transform
 
     # cat: 0 dog: 1
     def __getitem__(self, index):
         file_name = self.filenames[index]
-        img = cv2.imread(os.path.join(self.root_path, file_name))
-        # cv2.imshow("img", img)
-        # print("label : ", file_name.find("cat") == -1, file_name)
-        # cv2.waitKey(0)
-        img_size = (112, 112)
+        img = cv2.cvtColor(cv2.imread(os.path.join(self.root_path, file_name)), cv2.COLOR_BGR2RGB)
+        img_size = (400, 400)
         img = cv2.warpAffine(img, np.float32([[img_size[0] / img.shape[1], 0, 0], [0, img_size[1] / img.shape[0], 0]]),
                              img_size)
-        img_size = (224, 224)
-        img = cv2.warpAffine(img, np.float32([[img_size[0] / img.shape[1], 0, 0], [0, img_size[1] / img.shape[0], 0]]),
-                             img_size)
-        img = torch.tensor(img, dtype=torch.float)
-        img = img / 255.0
-        img = img.permute(2, 0, 1)
+        img = self.transform(image=img)['image']
         return img, torch.tensor(file_name.find("cat") == -1, dtype=torch.int64)
 
     def __len__(self):
@@ -41,34 +67,39 @@ class CatDogDataset(TensorDataset):
 
 
 class CNN(nn.Module):
-    def __init__(self, use_input_norm=True, device=torch.device('cuda:0')):
+    def __init__(self):
         super(CNN, self).__init__()
-        self.resnet = torchvision.models.resnet18(pretrained=True)
-        self.mlp = nn.Linear(1000, 2)
+        self.efficientnet = timm.create_model('tf_efficientnet_b4_ns', pretrained=True)
+        n_features = self.efficientnet.classifier.in_features
+        self.efficientnet.classifier = nn.Linear(n_features, 2)
+
 
     def forward(self, x):
-        x = self.resnet(x)
-        x = self.mlp(x)
+        x = self.efficientnet(x)
         return x
 
 
-# 用opencv放大图片
+# 主要结果
 if __name__ == "__main__":
     torch.manual_seed(0)
     cnn = CNN()
-    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    device = torch.device("cuda:2")
     cnn = cnn.to(device)
+    # cnn.load_state_dict(torch.load("net.pkl"))
 
-    train_loader = DataLoader(CatDogDataset("./train"), batch_size=20, shuffle=True)
-    valid_loader = DataLoader(CatDogDataset("./valid"), batch_size=20, shuffle=True)
+    train_loader = DataLoader(CatDogDataset("./train", get_train_transforms()), batch_size=5, shuffle=True)
+    valid_loader = DataLoader(CatDogDataset("./valid", get_valid_transforms()), batch_size=5, shuffle=True)
 
     optimizer = torch.optim.Adam(cnn.parameters(), lr=3e-4)
-    writer_train = SummaryWriter(log_dir="./board/warpAffine_small_warpAffine_large/train")
-    writer_valid = SummaryWriter(log_dir="./board/warpAffine_small_warpAffine_large/valid")
+    writer_train = SummaryWriter(log_dir="./board/efficientnet_augmentdata/train")
+    writer_valid = SummaryWriter(log_dir="./board/efficientnet_augmentdata/valid")
     print('start to train')
     idx_train = 0
     idx_valid = 0
-    for epoch in range(7):
+    for epoch in range(100000000):
+        with open("./stop_file.txt", "r") as file:
+            if file.readlines()[0].strip() != "0":
+                break
         cnn.train()
         print('train')
         for i, (imgs, labels) in enumerate(train_loader):
@@ -81,10 +112,12 @@ if __name__ == "__main__":
                 writer_train.add_scalar("train_loss", loss, idx_train)
                 writer_train.flush()
                 idx_train += 1
+                torch.save(cnn.state_dict(), "net.pkl")
 
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
+
 
         del i, imgs, labels, prediction, loss
 

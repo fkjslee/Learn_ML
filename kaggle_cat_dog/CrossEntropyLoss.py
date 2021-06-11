@@ -55,7 +55,7 @@ if __name__ == "__main__":
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     cnn = cnn.to(device)
 
-    train_loader = DataLoader(CatDogDataset("./train2"), batch_size=20, shuffle=True)
+    train_loader = DataLoader(CatDogDataset("./train"), batch_size=20, shuffle=True)
     valid_loader = DataLoader(CatDogDataset("./valid"), batch_size=20, shuffle=True)
 
     optimizer = torch.optim.Adam(cnn.parameters(), lr=3e-4)
@@ -67,15 +67,18 @@ if __name__ == "__main__":
     for epoch in range(7):
         cnn.train()
         print('train')
+        loss_all = []
         for i, (imgs, labels) in enumerate(train_loader):
             imgs = imgs.to(device)
             labels = labels.to(device)
             prediction = cnn(imgs)
             loss = nn.CrossEntropyLoss()(prediction, labels)
+            loss_all.append(loss)
             if i % 20 == 0:
                 print('train i = %d, epoch = %d, loss = %f' % (i, epoch, loss))
-                writer_train.add_scalar("train_loss", loss, idx_train)
+                writer_train.add_scalar("train_loss", torch.mean(torch.tensor(loss_all)), idx_train)
                 writer_train.flush()
+                loss_all = []
                 idx_train += 1
 
             optimizer.zero_grad()
@@ -97,9 +100,11 @@ if __name__ == "__main__":
             y = labels
             x = torch.topk(prediction, 1, 1).indices.reshape(-1)
             acc_all.append(torch.sum(x == y) / x.shape[0])
-            if i % 20 == 0:
+            if i % 5 == 0:
                 print('valid i = %d, epoch = %d, loss = %f acc = %f' % (i, epoch, loss, acc_all[0]))
                 writer_valid.add_scalar("valid_loss", torch.mean(torch.tensor(loss_all)), idx_valid)
                 writer_valid.add_scalar("valid_acc", torch.mean(torch.tensor(acc_all)), idx_valid)
+                acc_loss = []
+                loss_all = []
                 writer_valid.flush()
                 idx_valid += 1

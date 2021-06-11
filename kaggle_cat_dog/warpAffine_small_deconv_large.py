@@ -58,7 +58,7 @@ if __name__ == "__main__":
     device = torch.device("cuda:0")
     cnn = cnn.to(device)
 
-    train_loader = DataLoader(CatDogDataset("./train2"), batch_size=20, shuffle=True)
+    train_loader = DataLoader(CatDogDataset("./train"), batch_size=20, shuffle=True)
     valid_loader = DataLoader(CatDogDataset("./valid"), batch_size=20, shuffle=True)
 
     optimizer = torch.optim.Adam(cnn.parameters(), lr=3e-4)
